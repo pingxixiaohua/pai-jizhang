@@ -1,4 +1,7 @@
-import type { ReactNode } from 'react';
+import { type ReactNode, useState, useEffect } from 'react';
+import { getVersion } from '@tauri-apps/api/app';
+import { invoke } from '@tauri-apps/api/core';
+import { save, open } from '@tauri-apps/plugin-dialog';
 import type { Page } from '../types';
 
 interface LayoutProps {
@@ -15,6 +18,43 @@ const navItems: { key: Page; label: string; icon: string }[] = [
 ];
 
 export default function Layout({ currentPage, onNavigate, children }: LayoutProps) {
+  const [version, setVersion] = useState('0.0.0');
+  const [backupMsg, setBackupMsg] = useState<string | null>(null);
+
+  useEffect(() => {
+    getVersion().then(setVersion).catch(() => {});
+  }, []);
+
+  const handleBackup = async () => {
+    try {
+      const dest = await save({
+        defaultPath: `派记账_备份_${new Date().toISOString().slice(0, 10)}.db`,
+        filters: [{ name: 'SQLite 数据库', extensions: ['db'] }],
+      });
+      if (!dest) return;
+      await invoke('backup_db', { destPath: dest });
+      setBackupMsg('✅ 备份成功');
+      setTimeout(() => setBackupMsg(null), 3000);
+    } catch (e) {
+      setBackupMsg(`备份失败: ${e}`);
+      setTimeout(() => setBackupMsg(null), 5000);
+    }
+  };
+
+  const handleRestore = async () => {
+    try {
+      const src = await open({
+        filters: [{ name: 'SQLite 数据库', extensions: ['db'] }],
+        multiple: false,
+      });
+      if (!src) return;
+      if (!window.confirm('恢复数据将替换当前所有记录，确定继续？')) return;
+      await invoke('restore_db', { srcPath: src });
+      alert('✅ 恢复成功！请重新启动应用。');
+    } catch (e) {
+      alert(`恢复失败: ${e}`);
+    }
+  };
   return (
     <div className="flex h-screen">
       {/* Sidebar */}
@@ -49,8 +89,31 @@ export default function Layout({ currentPage, onNavigate, children }: LayoutProp
         </nav>
 
         {/* Footer */}
-        <div className="px-6 py-4 border-t border-gray-50">
-          <p className="text-xs text-gray-300">派记账 v0.1.0</p>
+        <div className="px-4 py-3 border-t border-gray-50 space-y-2">
+          <div className="flex items-center justify-between">
+            <p className="text-xs text-gray-300">派记账 v{version}</p>
+            <div className="flex items-center gap-1">
+              <button
+                onClick={handleBackup}
+                className="text-xs text-gray-400 hover:text-primary-500 transition-colors px-1 py-0.5"
+                title="备份数据"
+              >
+                📤
+              </button>
+              <button
+                onClick={handleRestore}
+                className="text-xs text-gray-400 hover:text-red-500 transition-colors px-1 py-0.5"
+                title="恢复数据"
+              >
+                📥
+              </button>
+            </div>
+          </div>
+          {backupMsg && (
+            <p className={`text-xs ${backupMsg.startsWith('✅') ? 'text-green-500' : 'text-red-500'}`}>
+              {backupMsg}
+            </p>
+          )}
         </div>
       </aside>
 

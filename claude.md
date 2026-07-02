@@ -7,7 +7,7 @@
 | **产品名称** | 派记账 (Pai Accounting) |
 | **定位** | 轻量级桌面记账应用，专注个人日常花销记录与管理 |
 | **运行平台** | Ubuntu Linux x64，deb 格式分发 |
-| **版本** | 0.3.0 |
+| **版本** | 0.4.0 |
 | **Slogan** | 每一笔，都算数 |
 
 ## 技术架构
@@ -52,6 +52,13 @@ Tauri v2 + React 18 + TypeScript + Tailwind CSS 3
 - 按月/年统计各分类花销占比
 - 饼图（分类占比）/ 柱状图（月度趋势）展示
 - 支持前后翻页切换月份
+
+### 6. 数据备份与恢复
+- 侧边栏底部 📤/📥 入口
+- 备份：弹出保存对话框，导出数据库 `.db` 文件
+- 恢复：弹出打开对话框，选择备份文件后恢复
+- 恢复后需重启应用生效
+- 恢复前自动创建安全备份（`.restore-bak`）
 
 ### 5. CSV 数据导出
 - 在账单列表页一键导出
@@ -125,6 +132,8 @@ CREATE TABLE expense (
 | `get_monthly_stats` | year, month | `Vec<CategoryStat>` | 月度分类统计 |
 | `get_monthly_totals` | year | `Vec<MonthlyTotal>` | 全年各月总计 |
 | `export_csv` | start_date, end_date (可选), file_path | `String` (文件路径) | 通过保存对话框导出 CSV |
+| `backup_db` | dest_path | `String` | 备份数据库到指定路径 |
+| `restore_db` | src_path | `()` | 从备份文件恢复数据库 |
 
 ## 前端组件树
 
@@ -209,5 +218,5 @@ npm run tauri build
 - [x] v0.1.0 — MVP: 记一笔 + 账单列表 + 分类管理
 - [x] v0.2.0 — 统计概览（饼图/柱状图）+ 新应用图标
 - [x] v0.3.0 — CSV 数据导出
-- [ ] v0.4.0 — 数据备份与恢复
+- [x] v0.4.0 — 数据备份与恢复
 - [ ] v1.0.0 — 正式发布

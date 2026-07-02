@@ -3,7 +3,10 @@ use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
 use tauri::State;
 
-pub struct DbState(pub Mutex<Connection>);
+pub struct DbState {
+    pub conn: Mutex<Connection>,
+    pub db_path: String,
+}
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct CategoryL1 {
@@ -127,7 +130,7 @@ fn seed_categories(conn: &Connection) {
 
 #[tauri::command]
 fn get_categories(state: State<DbState>) -> Result<Vec<CategoryL1>, String> {
-    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let conn = state.conn.lock().map_err(|e| e.to_string())?;
 
     let mut stmt = conn
         .prepare("SELECT id, name, icon, sort_order FROM category_level1 ORDER BY sort_order")
@@ -186,7 +189,7 @@ fn add_expense(
     date: String,
     note: Option<String>,
 ) -> Result<AddExpenseResult, String> {
-    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let conn = state.conn.lock().map_err(|e| e.to_string())?;
 
     conn.execute(
         "INSERT INTO expense (amount, category_l1_id, category_l2_id, date, note) VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -201,7 +204,7 @@ fn add_expense(
 
 #[tauri::command]
 fn get_expenses(state: State<DbState>, filter: Option<ExpenseFilter>) -> Result<Vec<Expense>, String> {
-    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let conn = state.conn.lock().map_err(|e| e.to_string())?;
 
     let mut sql = String::from(
         "SELECT e.id, e.amount, e.category_l1_id, e.category_l2_id,
@@ -260,7 +263,7 @@ fn get_expenses(state: State<DbState>, filter: Option<ExpenseFilter>) -> Result<
 
 #[tauri::command]
 fn delete_expense(state: State<DbState>, id: i64) -> Result<(), String> {
-    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let conn = state.conn.lock().map_err(|e| e.to_string())?;
     conn.execute("DELETE FROM expense WHERE id = ?1", params![id])
         .map_err(|e| e.to_string())?;
     Ok(())
@@ -268,7 +271,7 @@ fn delete_expense(state: State<DbState>, id: i64) -> Result<(), String> {
 
 #[tauri::command]
 fn add_category_l2(state: State<DbState>, parent_id: i64, name: String) -> Result<i64, String> {
-    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let conn = state.conn.lock().map_err(|e| e.to_string())?;
 
     let max_order: i64 = conn
         .query_row(
@@ -289,7 +292,7 @@ fn add_category_l2(state: State<DbState>, parent_id: i64, name: String) -> Resul
 
 #[tauri::command]
 fn delete_category_l2(state: State<DbState>, id: i64) -> Result<(), String> {
-    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let conn = state.conn.lock().map_err(|e| e.to_string())?;
 
     // Check if this category is in use
     let count: i64 = conn
@@ -315,7 +318,7 @@ fn get_monthly_stats(
     year: i32,
     month: u32,
 ) -> Result<Vec<CategoryStat>, String> {
-    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let conn = state.conn.lock().map_err(|e| e.to_string())?;
 
     let start_date = format!("{}-{:02}-01", year, month);
     let end_date = if month == 12 {
@@ -367,7 +370,7 @@ pub struct MonthlyTotal {
 
 #[tauri::command]
 fn get_monthly_totals(state: State<DbState>, year: i32) -> Result<Vec<MonthlyTotal>, String> {
-    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let conn = state.conn.lock().map_err(|e| e.to_string())?;
 
     let mut stmt = conn
         .prepare(
@@ -403,7 +406,7 @@ fn export_csv(
     end_date: Option<String>,
     file_path: String,
 ) -> Result<String, String> {
-    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let conn = state.conn.lock().map_err(|e| e.to_string())?;
 
     let mut sql = String::from(
         "SELECT e.date, l1.name as l1_name, l2.name as l2_name, e.amount, e.note
@@ -466,6 +469,87 @@ fn export_csv(
     Ok(file_path)
 }
 
+#[tauri::command]
+fn backup_db(state: State<DbState>, dest_path: String) -> Result<String, String> {
+    // Flush WAL to main DB file so we get a consistent snapshot
+    {
+        let conn = state.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
+            .map_err(|e| e.to_string())?;
+    }
+
+    let db_path = &state.db_path;
+    let wal_path = format!("{}-wal", db_path);
+    let shm_path = format!("{}-shm", db_path);
+
+    // Copy main DB file
+    std::fs::copy(db_path, &dest_path).map_err(|e| format!("备份失败: {}", e))?;
+
+    // Also copy WAL/SHM if they exist (not strictly needed after checkpoint, but safe)
+    let dest_wal = format!("{}-wal", &dest_path);
+    let dest_shm = format!("{}-shm", &dest_path);
+    let _ = std::fs::copy(&wal_path, &dest_wal);
+    let _ = std::fs::copy(&shm_path, &dest_shm);
+
+    Ok(dest_path)
+}
+
+#[tauri::command]
+fn restore_db(state: State<DbState>, src_path: String) -> Result<(), String> {
+    // Validate: is it a pai-jizhang database?
+    let test_conn = Connection::open(&src_path).map_err(|e| format!("无法打开备份文件: {}", e))?;
+    let has_expense: bool = test_conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='expense'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .map(|c| c > 0)
+        .unwrap_or(false);
+    let has_categories: bool = test_conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='category_level1'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .map(|c| c > 0)
+        .unwrap_or(false);
+    if !has_expense || !has_categories {
+        return Err("不是有效的派记账数据库备份文件".to_string());
+    }
+    drop(test_conn);
+
+    // Flush WAL and close
+    {
+        let conn = state.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
+            .map_err(|e| e.to_string())?;
+    }
+
+    let db_path = &state.db_path;
+
+    // Keep a safety backup of the old DB
+    let safety = format!("{}.restore-bak", db_path);
+    std::fs::copy(db_path, &safety).map_err(|e| format!("无法创建安全备份: {}", e))?;
+
+    // Copy restored DB into place
+    if let Err(e) = std::fs::copy(&src_path, db_path) {
+        // Try to restore safety backup
+        let _ = std::fs::copy(&safety, db_path);
+        let _ = std::fs::remove_file(&safety);
+        return Err(format!("恢复失败，已还原原有数据: {}", e));
+    }
+
+    // Clean up WAL files from restored DB
+    let wal_path = format!("{}-wal", db_path);
+    let shm_path = format!("{}-shm", db_path);
+    let _ = std::fs::remove_file(&wal_path);
+    let _ = std::fs::remove_file(&shm_path);
+    let _ = std::fs::remove_file(&safety);
+
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let app_dir = dirs_next().unwrap_or_else(|| std::path::PathBuf::from("."));
@@ -483,7 +567,10 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_sql::Builder::default().build())
         .plugin(tauri_plugin_dialog::init())
-        .manage(DbState(Mutex::new(conn)))
+        .manage(DbState {
+            conn: Mutex::new(conn),
+            db_path: db_path.to_string_lossy().to_string(),
+        })
         .invoke_handler(tauri::generate_handler![
             get_categories,
             add_expense,
@@ -494,6 +581,8 @@ pub fn run() {
             get_monthly_stats,
             get_monthly_totals,
             export_csv,
+            backup_db,
+            restore_db,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
